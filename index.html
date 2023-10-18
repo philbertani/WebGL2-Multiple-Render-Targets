@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+
+<html>
+<head>
+<meta charset="UTF-8">
+<title>WebGL blitting</title>
+
+<script>
+
+"use strict";
+
+//as usual master eck has the best examples
+//https://math.hws.edu/graphicsbook/source/webgl/multiple-draw-buffers-webgl2.html
+
+const  vertexShaderSource = `#version 300 es
+layout(location = 0) in vec2 a_coords; // Coordinates in the range 0.0 to 1.0
+//in vec2 a_coords;  //we do not usually need to specify layout(location...), but in this case are
+//explicitly checking that it is at location: 0
+
+uniform sampler2D u_picture;   // the user specified texture - xxx.jpg in this case
+out vec2 v_coords;  // pass coordinates to fragment shader for use as texture coordinates
+void main() {
+   float x = -1.0 + 2.0*a_coords.x;  // transform to ndc
+   float y = -1.0 + 2.0*a_coords.y;
+   gl_Position = vec4(x, y, 0.0, 1.0);
+   v_coords = a_coords;
+}`;
+
+const fragmentShaderSourceFB = `#version 300 es
+precision mediump float;
+uniform sampler2D u_picture;
+in vec2 v_coords;
+
+//we have the option of using gl.R8 which is just one float instead of vector of floats
+//see call to  gl.texStorage2D  below
+
+//use the usual fragment Coord color
+layout(location = 0) out vec4 b0;   // write to draw buffer 0
+layout(location = 1) out vec4 b1; // write to draw buffer 1
+layout(location = 2) out vec4 b2;  // write to draw buffer 2
+
+void main() {
+
+    float a = atan(1.)*2.;
+    vec2 v2 = mat2(cos(a),-sin(a),sin(a),cos(a))*v_coords;
+
+    a *= 2.;
+    vec2 v3 = mat2(cos(a),-sin(a),sin(a),cos(a))*v_coords;
+
+    vec4 color = texture(u_picture, v_coords);
+
+    //write out the full colors modified to full color textures
+    b0 = color * vec4(1,.75,0,1) ;
+    b1 = texture(u_picture,v2) * vec4(.5,1.2,.25,1);
+    b2 = texture(u_picture,v3) * vec4(.25,.75,1.2,1);
+}`;
+
+const fragmentShaderSourceScreen = `#version 300 es
+precision mediump float;
+uniform sampler2D u_texture;
+uniform sampler2D u_text3;
+
+in vec2 v_coords;
+out vec4 color;
+void main() {
+    vec2 texCoords = vec2( v_coords.x, 1.0 - v_coords.y );
+
+    color = texture(u_texture, texCoords);
+
+    vec4 color2 = texture(u_text3, texCoords);
+
+    color = max( color, color2);  //interesting
+
+    vec4 c2 = color*color;
+    //doing the following makes the color gradients more dramatic
+    color = 1. - exp(-c2*c2);
+    color = sqrt(color);
+}`;
+
+//--------------------------------------------------------------------
+
+let gl;      // The WebGL graphics context.
+
+let progFB;  // Shader program for drawing to the framebuffer.
+
+let uniformPicture;  // Location of the uniform sampler variable "u_picture" in progFB
+
+const attributeCoords = 0;  // Location of the attribute "a_coords" in shader programs, why do we care?
+
+let  bufferCoords;     // A vertex buffer object to hold the values for coords.
+
+let progScreen;  // Shader program for drawing to the screen.
+let uniformTexture;   // Location of the attribute "u_texture" in progScreen.
+let utext3;
+
+let fboIN, fboOUT;
+
+let format; // = gl.RGBA8; //gl.RGBA8;  //gl.R8 previously
+const [width,height] = [320,399];
+let buffOffset = 0;
+
+function fbo(gl,{dim,texFormat,numTargets}) {
+    const fb =  gl.createFramebuffer();
+    this.frameBuffer = fb;
+    gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
+    this.textures = [];
+    this.drawBuffers = [];
+    this.numTargets = numTargets ?? 1;
+    this.dim = dim;
+
+    const {width,height} = dim;
+    for (let i=0; i<this.numTargets; i++) {
+        const txt = gl.createTexture();
+        this.textures.push(txt);
+        gl.bindTexture(gl.TEXTURE_2D, txt);
+        gl.texStorage2D(gl.TEXTURE_2D,1,texFormat,width,height);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0+i,gl.TEXTURE_2D,txt,0);
+        this.drawBuffers.push(gl.COLOR_ATTACHMENT0+i);
+    }
+    gl.drawBuffers(this.drawBuffers);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+    return this;
+}
+
+function blitAll(gl,read,draw) {
+
+    //if read and draw have different numTargets we are screwed
+    if (draw.numTargets < read.numTargets) {
+        console.log("blit draw fbo has less targets than read", read.numTargets, draw.numTargets);
+        throw new error("blitty insanity");
+    }
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, read.frameBuffer);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, draw.frameBuffer);
+
+    for (let i=0; i<read.numTargets; i++) {
+        const buffers = Array(read.numTargets).fill(gl.NONE);
+        buffers[i] = gl.COLOR_ATTACHMENT0 + i;
+        gl.readBuffer(gl.COLOR_ATTACHMENT0+i);
+        gl.drawBuffers(buffers);
+        gl.blitFramebuffer(0, 0, width, height, 0, 0, width, height, 
+                  gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    }
+
+}
+
+function cycleBuffers(elem) {
+    //console.log(elem);
+    buffOffset ++;
+    draw();
+}
+
+let doneone = false;
+
+function draw() {
+ 
+    if ( !doneone) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fboOUT.frameBuffer); // Draw to framebuffer.
+        gl.useProgram(progFB);
+        gl.viewport(0,0,320,399);
+        gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+        blitAll(gl, fboOUT, fboIN);
+        doneone = true;
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);  // Draw to screen.
+    gl.useProgram(progScreen);
+    gl.uniform1i(utext3,1);
+
+    for (let i=0; i<fboOUT.numTargets; i++) {
+
+        gl.activeTexture(gl.TEXTURE1);
+
+        const j = (i+buffOffset)%3;
+        console.log(i,j);
+        gl.bindTexture(gl.TEXTURE_2D, fboIN.textures[ j ]);
+     
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, fboOUT.textures[i]);
+
+        //shift the left corner of the viewport over so we can display separate images
+        gl.viewport(330*i,0,320,399);
+        gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+
+        //gl.activeTexture(gl.TEXTURE0);
+        //gl.bindTexture(gl.TEXTURE_2D,null);
+
+        //gl.activeTexture(gl.TEXTURE1);
+        //gl.bindTexture(gl.TEXTURE_2D,null);
+    }
+
+}
+
+/**
+ * Initialize the WebGL graphics context.  Sets up the framebuffer, textures,
+ * and coordinate buffer.  
+ */
+function initGL() {
+
+    gl.clearColor(0,0,0,1);  // background will be opaque black
+    
+    // Create the shader program for drawing to the framebuffer.
+
+    progFB = createProgram( gl, vertexShaderSource, fragmentShaderSourceFB );
+    
+    gl.useProgram(progFB);
+    let attributeCoordsActual = gl.getAttribLocation(progFB, "a_coords"); // should be  zero!
+    if (attributeCoordsActual !== 0)
+       throw new Error("I don't understand layout modifier for attribute variables");
+       
+    uniformPicture = gl.getUniformLocation(progFB, "u_picture");
+    gl.uniform1i(uniformPicture, 0);    
+   
+    const format = gl.RGBA8; //gl.RGBA32F; //gl.RGBA8;
+    //allocate and initialize framebuffers with multiple COLOR_ATTACHMENTS (render targets)
+    fboOUT = new fbo(gl,{dim:{width:320,height:399},texFormat:format,numTargets:3});
+    fboIN = new fbo(gl,{dim:{width:320,height:399},texFormat:format,numTargets:3});
+
+    // Create the shader program for drawing to the screen.
+    progScreen = createProgram( gl, vertexShaderSource, fragmentShaderSourceScreen );
+    uniformTexture = gl.getUniformLocation(progScreen, "u_texture");
+    utext3 = gl.getUniformLocation(progScreen, "u_text3");
+
+    // Configure the attributeCoords vertex attribute for drawing a square.
+    bufferCoords = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufferCoords);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array( [ 0,0, 1,0, 1,1, 0,1 ] ), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(attributeCoords);
+    gl.vertexAttribPointer(attributeCoords, 2, gl.FLOAT, false, 0, 0);
+            
+    // Load the image and call draw() in the callback       
+    let textureObject = gl.createTexture();
+    loadTexture(textureObject);
+}
+
+function loadTexture(textureObject ) {
+    const  img = new Image();  //  A DOM image element to represent the image.
+    img.onload = function() { 
+        // This function will be called after the image loads successfully.
+        // We have to bind the texture object to the TEXTURE_2D target before
+        // loading the image into the texture object. 
+        gl.bindTexture(gl.TEXTURE_2D, textureObject);
+        try {
+           gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,img);
+           //gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.FLOAT,img);
+        }
+        catch (e) { // Probably a security exception, because this page has been
+                    // loaded through a file:// URL.
+            document.getElementById("canvas-holder").innerHTML =
+              "Sorry, couldn't load texture.<br>" +
+              "Some web browsers won't use images from a local disk";
+            animating = false;
+            document.getElementById("animateCheckbox").checked = true
+        }
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER,gl.LINEAR);  // no mipmaps
+
+        draw();  // Draw the canvas, with the texture.  
+    };
+    img.onerror = function(e) { 
+        // This function will be called if an error occurs while loading.
+        document.getElementById("canvas-holder").innerHTML =
+                        "<p>Sorry, xxx.jpg could not be loaded.</p>";
+        animating = false;
+        document.getElementById("animateCheckbox").checked = false;
+    };
+    img.src = "xxx.jpg";  // Start loading of the image.
+}
+
+function createProgram(gl, vertexShaderSource, fragmentShaderSource) {
+   let  vsh = gl.createShader( gl.VERTEX_SHADER );
+   gl.shaderSource( vsh, vertexShaderSource );
+   gl.compileShader( vsh );
+   if ( ! gl.getShaderParameter(vsh, gl.COMPILE_STATUS) ) {
+      throw new Error("Error in vertex shader:  " + gl.getShaderInfoLog(vsh));
+   }
+   let  fsh = gl.createShader( gl.FRAGMENT_SHADER );
+   gl.shaderSource( fsh, fragmentShaderSource );
+   gl.compileShader( fsh );
+   if ( ! gl.getShaderParameter(fsh, gl.COMPILE_STATUS) ) {
+      throw new Error("Error in fragment shader:  " + gl.getShaderInfoLog(fsh));
+   }
+   let  prog = gl.createProgram();
+   gl.attachShader( prog, vsh );
+   gl.attachShader( prog, fsh );
+   gl.linkProgram( prog );
+   if ( ! gl.getProgramParameter( prog, gl.LINK_STATUS) ) {
+      throw new Error("Link error in program:  " + gl.getProgramInfoLog(prog));
+   }
+   return prog;
+}
+
+function init() {
+    let canvas;
+    try {
+        canvas = document.getElementById("webglcanvas");
+        let  options = {
+            depth: false,
+            antialias: true
+        };
+        gl = canvas.getContext("webgl2", options);
+              // Note: this page requires webgl2.
+        if ( ! gl ) {
+            throw "Browser does not support WebGL 2.0";
+        }
+        format = gl.RGBA8;
+    }
+    catch (e) {
+        document.getElementById("canvas-holder").innerHTML =
+            "<p>Sorry, could not get a WebGL 2.0 graphics context.</p>";
+        return;
+    }
+    try {
+        initGL();  // initialize the WebGL graphics context
+    }
+    catch (e) {
+        document.getElementById("canvas-holder").innerHTML =
+            "<p>Sorry, could not initialize the WebGL graphics context: " + e + "</p>";
+        return;
+    }
+
+    const ext = gl.getExtension("EXT_color_buffer_float");
+    if (!ext) {
+        alert("need EXT_color_buffer_float");
+    }
+    else {
+        console.log("32 bit float textures enabled", ext);
+    }
+
+}
+
+window.onload = init;  // Arrange for init() to be called after page has loaded.
+
+</script>
+</head>
+<body style="background-color: #CCD0FF">
+
+<h2>WebGL2 Multiple Render Targets and Blitting</h2>
+
+<noscript><p><b>Sorry, but this page requires JavaScript.</b></p></noscript>
+
+<div id="canvas-holder">
+<canvas id="webglcanvas" width="980" height="399" style="background-color:white"></canvas>
+</div>
+
+<p style="width:900px">
+<img style="float:left; margin: 0 10px 0 0" src="xxx.jpg" width="320" height="399">
+</p>
+
+<button onclick="cycleBuffers(this)">"Cycle Buffers"</button>
+
+</body>
+</html>
