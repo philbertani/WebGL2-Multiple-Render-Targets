@@ -43,7 +43,6 @@ void main() {
 
     float a = atan(1.)*2.;
     vec2 v2 = mat2(cos(a),-sin(a),sin(a),cos(a))*v_coords;
-
     a *= 2.;
     vec2 v3 = mat2(cos(a),-sin(a),sin(a),cos(a))*v_coords;
 
@@ -54,6 +53,35 @@ void main() {
     b1 = texture(u_picture,v2) * vec4(.5,1.2,.25,1);
     b2 = texture(u_picture,v3) * vec4(.25,.75,1.2,1);
 }`;
+
+
+const feedBackFrag = `#version 300 es
+precision mediump float;
+uniform sampler2D u0,u1,u2,uPic;
+in vec2 v_coords;
+
+//we have the option of using gl.R8 which is just one float instead of vector of floats
+//see call to  gl.texStorage2D  below
+
+//use the usual fragment Coord color
+layout(location = 0) out vec4 b0;   // write to draw buffer 0
+layout(location = 1) out vec4 b1;   // write to draw buffer 1
+layout(location = 2) out vec4 b2;   // write to draw buffer 2
+
+void main() {
+    vec2 texCoords = v_coords; //vec2( v_coords.x, 1.0 - v_coords.y );
+
+    float a = atan(1.);
+    vec2 v2 = mat2(cos(a),-sin(a),sin(a),cos(a))*v_coords;
+
+    //vec4 origColor = texture(uPic, v2);
+
+    b0 = texture(u0, texCoords); 
+    b1 = texture(u1, texCoords) + .02*b0;
+    b2 = texture(u2, texCoords) + .1*b1;
+
+}`;
+
 
 const fragmentShaderSourceScreen = `#version 300 es
 precision mediump float;
@@ -82,18 +110,23 @@ void main() {
 let gl;      // The WebGL graphics context.
 
 let progFB;  // Shader program for drawing to the framebuffer.
+let progFeedBack;
 
 let uniformPicture;  // Location of the uniform sampler variable "u_picture" in progFB
 
 const attributeCoords = 0;  // Location of the attribute "a_coords" in shader programs, why do we care?
 
-let  bufferCoords;     // A vertex buffer object to hold the values for coords.
+let bufferCoords;     // A vertex buffer object to hold the values for coords.
 
 let progScreen;  // Shader program for drawing to the screen.
 let uniformTexture;   // Location of the attribute "u_texture" in progScreen.
 let utext3;
 
 let fboIN, fboOUT;
+let uniformsFB = [];
+let uPic;
+const numTargets = 3;
+let textureObject;
 
 let format; // = gl.RGBA8; //gl.RGBA8;  //gl.R8 previously
 const [width,height] = [320,399];
@@ -130,6 +163,7 @@ function blitAll(gl,read,draw) {
         console.log("blit draw fbo has less targets than read", read.numTargets, draw.numTargets);
         throw new error("blitty insanity");
     }
+
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, read.frameBuffer);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, draw.frameBuffer);
 
@@ -139,8 +173,10 @@ function blitAll(gl,read,draw) {
         gl.readBuffer(gl.COLOR_ATTACHMENT0+i);
         gl.drawBuffers(buffers);
         gl.blitFramebuffer(0, 0, width, height, 0, 0, width, height, 
-                  gl.COLOR_BUFFER_BIT, gl.NEAREST);
+                            gl.COLOR_BUFFER_BIT, gl.NEAREST);
     }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER,null);
 
 }
 
@@ -153,7 +189,7 @@ function cycleBuffers(elem) {
 let doneone = false;
 
 function draw() {
- 
+
     if ( !doneone) {
         gl.bindFramebuffer(gl.FRAMEBUFFER, fboOUT.frameBuffer); // Draw to framebuffer.
         gl.useProgram(progFB);
@@ -163,17 +199,54 @@ function draw() {
         doneone = true;
     }
 
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);  // Draw to screen.
+    console.log("entering draw() function");
+
+    function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+    let frameCount = 0;
+    let fps = 100;
+    let prevRenderTime = Date.now();
+
+    function run(time) {
+
+        gl.useProgram(progFeedBack);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fboOUT.frameBuffer)
+        for (let i = 0; i < numTargets; i++) {
+            gl.uniform1i(uniformsFB[i], i);
+            gl.activeTexture(gl.TEXTURE0 + i);
+            gl.bindTexture(gl.TEXTURE_2D, fboIN.textures[i]);
+        }
+        gl.activeTexture(gl.TEXTURE0 + numTargets);
+        gl.bindTexture(gl.TEXTURE_2D, textureObject);
+
+        gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+        blitAll(gl, fboOUT, fboIN);
+
+    }
+
+    //we have to clear something in the fbos or textures to re draw with different amounts
+    //if I change i and restart program it works but not if I increment the maximum i within
+    //the running program - what gives?
+
+    for (let i=0; i<8; i++) {
+        console.log('zzz',i);
+        run();
+    }
+    
     gl.useProgram(progScreen);
     gl.uniform1i(utext3,1);
 
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);  // Draw to screen.
+
     for (let i=0; i<fboOUT.numTargets; i++) {
 
-        gl.activeTexture(gl.TEXTURE1);
+        //just texture shuffling here
 
-        const j = (i+buffOffset)%3;
+        const j = i; //(i+buffOffset)%3;
         console.log(i,j);
-        gl.bindTexture(gl.TEXTURE_2D, fboIN.textures[ j ]);
+
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, fboIN.textures[j]);
      
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, fboOUT.textures[i]);
@@ -182,19 +255,17 @@ function draw() {
         gl.viewport(330*i,0,320,399);
         gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
 
-        //gl.activeTexture(gl.TEXTURE0);
-        //gl.bindTexture(gl.TEXTURE_2D,null);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D,null);
 
-        //gl.activeTexture(gl.TEXTURE1);
-        //gl.bindTexture(gl.TEXTURE_2D,null);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D,null);
+
     }
-
+    
 }
 
-/**
- * Initialize the WebGL graphics context.  Sets up the framebuffer, textures,
- * and coordinate buffer.  
- */
+
 function initGL() {
 
     gl.clearColor(0,0,0,1);  // background will be opaque black
@@ -204,22 +275,29 @@ function initGL() {
     progFB = createProgram( gl, vertexShaderSource, fragmentShaderSourceFB );
     
     gl.useProgram(progFB);
-    let attributeCoordsActual = gl.getAttribLocation(progFB, "a_coords"); // should be  zero!
+    let attributeCoordsActual = gl.getAttribLocation(progFB, "a_coords"); // should be zero!
     if (attributeCoordsActual !== 0)
        throw new Error("I don't understand layout modifier for attribute variables");
        
     uniformPicture = gl.getUniformLocation(progFB, "u_picture");
     gl.uniform1i(uniformPicture, 0);    
    
-    const format = gl.RGBA8; //gl.RGBA32F; //gl.RGBA8;
-    //allocate and initialize framebuffers with multiple COLOR_ATTACHMENTS (render targets)
-    fboOUT = new fbo(gl,{dim:{width:320,height:399},texFormat:format,numTargets:3});
-    fboIN = new fbo(gl,{dim:{width:320,height:399},texFormat:format,numTargets:3});
-
     // Create the shader program for drawing to the screen.
     progScreen = createProgram( gl, vertexShaderSource, fragmentShaderSourceScreen );
     uniformTexture = gl.getUniformLocation(progScreen, "u_texture");
     utext3 = gl.getUniformLocation(progScreen, "u_text3");
+
+    progFeedBack = createProgram(gl, vertexShaderSource, feedBackFrag);
+    for (let i=0; i<numTargets; i++) {
+        const uFB = gl.getUniformLocation(progFeedBack,"u"+i.toString());
+        uniformsFB.push(uFB);
+    }
+    uPic =  gl.getUniformLocation(progFeedBack, "uPic");
+    
+    const format = gl.RGBA8; //gl.RGBA32F; //gl.RGBA8;
+    //allocate and initialize framebuffers with multiple COLOR_ATTACHMENTS (render targets)
+    fboOUT = new fbo(gl,{dim:{width:320,height:399},texFormat:format,numTargets});
+    fboIN = new fbo(gl,{dim:{width:320,height:399},texFormat:format,numTargets});
 
     // Configure the attributeCoords vertex attribute for drawing a square.
     bufferCoords = gl.createBuffer();
@@ -229,16 +307,13 @@ function initGL() {
     gl.vertexAttribPointer(attributeCoords, 2, gl.FLOAT, false, 0, 0);
             
     // Load the image and call draw() in the callback       
-    let textureObject = gl.createTexture();
+    textureObject = gl.createTexture();
     loadTexture(textureObject);
 }
 
 function loadTexture(textureObject ) {
     const  img = new Image();  //  A DOM image element to represent the image.
     img.onload = function() { 
-        // This function will be called after the image loads successfully.
-        // We have to bind the texture object to the TEXTURE_2D target before
-        // loading the image into the texture object. 
         gl.bindTexture(gl.TEXTURE_2D, textureObject);
         try {
            gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,img);
@@ -323,6 +398,7 @@ function init() {
         alert("need EXT_color_buffer_float");
     }
     else {
+        //get ready to render using float32 fbo
         console.log("32 bit float textures enabled", ext);
     }
 
@@ -346,7 +422,7 @@ window.onload = init;  // Arrange for init() to be called after page has loaded.
 <img style="float:left; margin: 0 10px 0 0" src="xxx.jpg" width="320" height="399">
 </p>
 
-<button onclick="cycleBuffers(this)">"Cycle Buffers"</button>
+<button onclick="cycleBuffers(this)">"Cycle Textures"</button>
 
 </body>
 </html>
